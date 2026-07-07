@@ -58,6 +58,20 @@ type StoreError struct {
 
 const binderposMaxConcurrent = 12
 
+// moxMaxConcurrent bounds in-flight requests to Mox & Lotus process-wide. Its
+// full_search endpoint is throughput-limited server-side (it serializes
+// expensive queries at roughly one per second), so a batched decklist search
+// that fires every card at it concurrently made the slow tail exceed
+// PerSiteTimeout — the store errored on ~1/3 of cards and, because searchShops
+// waits for every shop, pinned *every* search at the full 20s floor. Keeping
+// our in-flight count near what the endpoint can actually serve fixes both.
+const moxMaxConcurrent = 5
+
+// moxGate is process-global (not per-search) on purpose: the pile-up comes from
+// many concurrent single-card /api/search calls, each issuing one Mox request,
+// so a per-search gate would see only one Mox request and never engage.
+var moxGate = make(chan struct{}, moxMaxConcurrent)
+
 var sendDiscordAlert = alert.SendDiscordAlert
 
 type shopSpec struct {
@@ -239,6 +253,21 @@ func searchShop(
 	defer func() {
 		aggregator.addShopDuration(shopName, time.Since(start))
 	}()
+
+	// Acquire the Mox slot against the PARENT ctx, *before* the per-site deadline
+	// below starts, so a queued card waits for capacity without spending its own
+	// PerSiteTimeout budget — each request then gets a full, fresh timeout of
+	// actual request time. Load testing a 15-card batch went from 13/15 (2
+	// timeouts, every search pinned at 20s) to 15/15 with this gate.
+	if shopName == moxandlotus.StoreName {
+		select {
+		case moxGate <- struct{}{}:
+			defer func() { <-moxGate }()
+		case <-ctx.Done():
+			recordShopSearchError(searchString, shopName, ctx.Err(), aggregator)
+			return
+		}
+	}
 
 	shopCtx, cancel := context.WithTimeout(ctx, config.PerSiteTimeout)
 	defer cancel()
