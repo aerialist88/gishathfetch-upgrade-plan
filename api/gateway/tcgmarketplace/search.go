@@ -5,41 +5,43 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
-	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
 	"mtg-price-checker-sg/gateway"
-	"mtg-price-checker-sg/pkg/config"
 )
 
 const StoreName = "The TCG Marketplace"
 const StoreBaseURL = "https://thetcgmarketplace.com"
 
-const cardLinkAPI = "https://thetcgmarketplace.com:3501/encoder/advancedsearch"
+// cardLinkAPI is the site's current (post-rebuild) search endpoint. The old
+// /encoder/advancedsearch endpoint (requiring TCG_MARKETPLACE_ACCESS_TOKEN,
+// never issued — see prior history) now returns an "Unathorised" error body
+// with a schema mismatch. /product/advancedfilter is the endpoint the site's
+// own frontend calls (confirmed via its JS bundle) and needs no auth.
+const cardLinkAPI = "https://thetcgmarketplace.com:3501/product/advancedfilter"
 const mtgCategoryNo = 3
-const accessTokenKey = "TCG_MARKETPLACE_ACCESS_TOKEN"
 
+// response matches /product/advancedfilter's shape. Unlike the old encoder
+// endpoint, this one does not return a per-listing URL. The site's frontend
+// builds per-listing links from an obfuscated id scheme not reverse-engineered
+// here, but its /search route only encrypts the card name (see searchlink.go),
+// so Search deep-links to the card's search results rather than the homepage.
 type response struct {
 	Status int `json:"status"`
 	Data   struct {
 		Message string `json:"message"`
 		Data    []struct {
-			Name                  string      `json:"name"`
-			Setcode               string      `json:"setcode"`
-			Setname               string      `json:"setname"`
-			Image                 string      `json:"image"`
-			Language              string      `json:"language"`
-			CrdFoilType           interface{} `json:"crd_foil_type"`
-			Rarity                string      `json:"rarity"`
-			Available             interface{} `json:"available"`
-			From                  interface{} `json:"from"`
-			NonFoilReferencePrice interface{} `json:"non_foil_reference_price"`
-			FoilReferencePrice    interface{} `json:"foil_reference_price"`
-			URL                   string      `json:"url"`
+			Name        string      `json:"name"`
+			Setcode     string      `json:"setcode"`
+			Setname     string      `json:"setname"`
+			Image       string      `json:"image"`
+			Language    string      `json:"language"`
+			CrdFoilType interface{} `json:"crd_foil_type"`
+			Rarity      string      `json:"rarity"`
+			Available   interface{} `json:"available"`
+			From        interface{} `json:"from"`
 		} `json:"data"`
 	} `json:"data"`
 	Meta struct {
@@ -54,10 +56,11 @@ type Store struct {
 }
 
 type payload struct {
-	AccessToken string `json:"access_token"`
-	Name        string `json:"name"`
-	Category    int32  `json:"category"`
-	Order       string `json:"order"`
+	CategoryID     int32  `json:"category_id"`
+	NameExactMatch bool   `json:"name_exact_match"`
+	AvailableOnly  bool   `json:"available_only"`
+	Name           string `json:"name"`
+	Order          string `json:"order"`
 }
 
 func NewLGS() gateway.LGS {
@@ -69,24 +72,22 @@ func NewLGS() gateway.LGS {
 
 func (s Store) Search(ctx context.Context, searchStr string) ([]gateway.Card, error) {
 	var (
-		res         response
-		cards       []gateway.Card
-		accessToken string
+		res   response
+		cards []gateway.Card
 	)
 
-	accessToken = os.Getenv(accessTokenKey)
-
 	reqPayload, err := json.Marshal(payload{
-		AccessToken: accessToken,
-		Name:        searchStr,
-		Category:    mtgCategoryNo,
-		Order:       "name_asc",
+		CategoryID:     mtgCategoryNo,
+		NameExactMatch: false,
+		AvailableOnly:  true,
+		Name:           searchStr,
+		Order:          "name_asc",
 	})
 	if err != nil {
 		return cards, err
 	}
 
-	res, err = getApiResponse(ctx, reqPayload, accessToken != "")
+	res, err = getApiResponse(ctx, reqPayload)
 	if err != nil {
 		return cards, err
 	}
@@ -118,21 +119,15 @@ func (s Store) Search(ctx context.Context, searchStr string) ([]gateway.Card, er
 					img = images[0]
 				}
 
-				// url
-				u := strings.TrimSpace(card.URL)
-				cleanPageURL, err := url.Parse(u)
-				if err != nil {
-					log.Printf("error parsing url for %s with value [%s]: %v", s.Name, u, err)
-					continue
-				}
-				cleanPageURL.RawQuery = url.Values{
-					"utm_source": []string{config.UtmSource},
-				}.Encode()
-
+				// The API returns no per-listing URL (see response struct
+				// comment), so we deep-link to the storefront's search results
+				// for this card by reproducing the frontend's own encrypted
+				// /search/<filter>/<catid> route (see searchlink.go). Falls
+				// back to the bare storefront if the link can't be built.
 				extraInfo := []string{fmt.Sprintf("[%s]", card.Setname)}
 				cards = append(cards, gateway.Card{
 					Name:      strings.TrimSpace(name),
-					Url:       cleanPageURL.String(),
+					Url:       buildSearchURL(searchStr),
 					InStock:   true,
 					Price:     price,
 					Source:    s.Name,
@@ -158,7 +153,7 @@ func isSurgeFoil(extraInfo []string, name string) bool {
 	return false
 }
 
-func getApiResponse(ctx context.Context, payload []byte, accessTokenConfigured bool) (response, error) {
+func getApiResponse(ctx context.Context, payload []byte) (response, error) {
 	var res response
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cardLinkAPI, bytes.NewBuffer(payload))
@@ -168,14 +163,9 @@ func getApiResponse(ctx context.Context, payload []byte, accessTokenConfigured b
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(payload))
 
-	var requestContext []string
-	if !accessTokenConfigured {
-		requestContext = append(requestContext, "access_token_configured=false")
-	}
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return res, gateway.WrapHTTPRequestError(err, req, requestContext...)
+		return res, gateway.WrapHTTPRequestError(err, req)
 	}
 	defer resp.Body.Close()
 

@@ -138,12 +138,12 @@ func RequireCardsCentralAPIStructure(t *testing.T, ctx context.Context, baseURL,
 }
 
 // RequireTCGMarketplaceAPIStructure verifies the TCG Marketplace advanced search API shape.
-func RequireTCGMarketplaceAPIStructure(t *testing.T, ctx context.Context, accessToken, query string) {
+func RequireTCGMarketplaceAPIStructure(t *testing.T, ctx context.Context, query string) {
 	t.Helper()
-	requestBody := []byte(fmt.Sprintf(`{"access_token":%q,"name":%q,"category":3,"order":"name_asc"}`, accessToken, query))
+	requestBody := []byte(fmt.Sprintf(`{"category_id":3,"name_exact_match":false,"available_only":true,"name":%q,"order":"name_asc"}`, query))
 	RequireJSONStructure(t, ctx, JSONProbe{
 		Method: "POST",
-		URL:    "https://thetcgmarketplace.com:3501/encoder/advancedsearch",
+		URL:    "https://thetcgmarketplace.com:3501/product/advancedfilter",
 		Body:   requestBody,
 		Headers: map[string]string{
 			"Content-Type": "application/json",

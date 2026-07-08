@@ -2,7 +2,6 @@ package tcgmarketplace
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"mtg-price-checker-sg/gateway/gatewaytest"
@@ -53,8 +52,8 @@ func Test_Search(t *testing.T) {
 	s := NewLGS()
 	result, err := s.Search(context.Background(), "abrade")
 	gatewaytest.RequireSearchOrProbe(t, err, result, gatewaytest.CardExpect{
-		URLContains: StoreBaseURL + "/product/B/",
+		URLContains: StoreBaseURL,
 	}, func(t *testing.T, ctx context.Context) {
-		gatewaytest.RequireTCGMarketplaceAPIStructure(t, ctx, os.Getenv(accessTokenKey), "abrade")
+		gatewaytest.RequireTCGMarketplaceAPIStructure(t, ctx, "abrade")
 	})
 }
